@@ -1,0 +1,842 @@
+#!/bin/sh -e
+
+help() echo "\
+Usage: `basename $0` <operation> [...]
+A Swiss-Army-Knife for working with overlay directories.
+Type 'overlay help <command>' for detailed help on a command.
+Type 'overlay sim[ulate] <command>' to simulate a command.
+
+Operations:
+    copy (cp)
+    create (c, o)
+    extract (x, i)
+    cpio|files copy|create|extract
+    chmod [svn] copy|create|extract
+    chown [svn] copy|create|extract
+    update|up
+    commit|ci
+    default[s]
+    restore
+    property|prop|p create|extract
+    simulate
+    help
+"
+
+#   The overlay tool can create and extract archives of
+#   overlays using cpio.  There's a shorthand for copying.
+#   
+#   The overlay tool can also maintain the Subversion properties
+#   unix:chmod, unix:chown, and svn:executable.  You can pipeline
+#   lists of permissions from Subversion or the file system
+#   back into either Subversion or the file system.  There are
+#   shorthands for copying with defaults that make it convenient
+#   to copy either from Subversion to the file system or from
+#   the file system into Subversion.
+#   
+#   EXAMPLES
+#   
+#   Update permissions and ownership from an updated
+#   copy of a Subversion checkout:
+#   
+#       svn up
+#       overlay chmod svn cp
+#       overlay chown svn cp
+#   
+#   Commit permissions and ownership to Subversion:
+#   
+#       overlay chmod cp
+#       overlay chown cp
+#       svn ci -m 'Updated permissions and ownership'
+#   
+#   You can install an overlay to the root of the file system
+#   complete with ownership and permissions:
+#   
+#       svn up overlay
+#       overlay cp overlay /
+#       overlay chmod cp overlay /
+#       overlay chown cp overlay /
+#   
+
+. `dirname $0`/../lib/sh/swiss_army.subr
+
+#
+# COPY
+#
+
+help_copy() echo "\
+Usage: `basename $0` copy|cp <source> <target>
+    Copies files from one overlay to another.
+    Initializes default files if they have not
+    been already created.
+"
+
+shortcut cpio_copy copy
+shortcut copy cp
+
+do_copy() {
+    source=${1?No source specified.}
+    target=${2?No target specified.}
+    do_cpio_copy $*
+    do_default $2
+}
+
+#
+# CREATE
+#
+
+shortcut cpio_create create
+shortcut create c
+shortcut create o
+
+#
+# EXTRACT
+#
+
+shortcut cpio_extract extract
+shortcut extract x
+shortcut extract i
+
+
+#
+# CPIO
+#
+
+help_cpio_main() echo "\
+Usage: `basename $0` [cpio|files] copy|create|extract ...
+"
+menu cpio
+shortcut cpio files
+
+#
+# CPIO COPY
+#
+
+help_cpio_copy() echo "\
+Usage: `basename $0` cpio|files copy|cp <source> <target>
+    overlays all of the content of a source directory
+    onto a target directory.  If the target path does
+    not yet exist, it is created.  overlay copy uses
+    cpio to preserve ownership and permissions.
+
+    If the source is a literal hyphen, '-', then
+    the source overlay directory is assumed to be the
+    working directory and the desired files are read
+    as lines from standard input.
+"
+shortcut cpio_copy cpio_cp
+do_cpio_copy() {
+    source=${1?No source specified.}
+    target=${2?No target specified.}
+    do_cpio_create $source | do_cpio_extract $target
+}
+
+#
+# CPIO CREATE
+#
+
+help_cpio_create() echo "\
+Usage: `basename $0` cpio|files create|c|o <source>
+    Creates an archive of an overlay directory and writes
+    it to standard output.
+
+    If the source argument is a hyphen, -, a list of files
+    is read from standard input instead of sought from
+    the given directory.
+"
+shortcut cpio_create cpio_c cpio_o
+do_cpio_create() {
+    (
+        (
+            if [ "$1" = '-' ]; then
+                cat
+            else
+                cd ${1-.};
+                find -d .
+            fi
+        ) |
+        (
+            if [ "$1" != '-' ]; then
+                cd ${1-.};
+            fi
+            cpio -oV --format=newc
+        )
+    )
+}
+
+#
+# CPIO EXTRACT
+#
+
+help_cpio_extract() echo "\
+Usage: `basename $0` cpio|files extract|x|i <target>
+    Takes an archive of an overlay directory from standard
+    input and extracts it onto a target overlay directory.
+"
+shortcut cpio_extract cpio_x cpio_i
+do_cpio_extract() {
+    target=${1-.}
+    mkdir -p $target
+    (   
+        cd $target;
+        cpio -idVu
+    )
+}
+
+
+
+
+
+
+
+#
+# CHMOD
+#
+
+help_chmod_main() echo "\
+Usage: `basename $0` chmod [svn] create|extract|copy <source|target>
+    Creates or extracts UNIX permission information
+    to and from file systems or Subversion repositories.
+
+    Shortcuts all apply including:
+        create c o
+        extract x i
+        copy cp
+"
+menu chmod
+
+#
+# CHMOD COPY
+#
+
+help_chmod_copy() echo "\
+Usage: `basename $0` chmod copy|cp [<source>] [<target>]
+    Copies permission information from the actual
+    permissions in a given source overlay and updates
+    the unix:chmod Subversion properties in the given
+    target overlay.
+
+    By default, the source overlay is the current
+    working directory.
+
+    By default, the target is the same as the source.
+"
+
+shortcut chmod_copy chmod_cp
+
+do_chmod_copy() {
+    do_simulate_chmod_copy $* | run $*
+}
+
+do_simulate_chmod_copy() {
+    source=${1-.}
+    target=${2-$source}
+    do_chmod_create $source | do_simulate_chmod_svn_extract $target
+}
+
+#
+# CHMOD CREATE
+#
+
+help_chmod_create() echo "\
+Usage: `basename $0` chmod create|c|o <source>
+    Writes a sequence of pairs of lines, a file name
+    and its corresponding permissions from the file
+    system.
+"
+
+shortcut chmod_create chmod_c
+shortcut chmod_create chmod_o
+
+do_chmod_create() {
+    (
+        cd ${1-.};
+        find . | grep -v '/\.svn' |
+        while read file; do
+            mod=`stat -f '%p' $file`
+            mod=`expr $mod : '.*\(....\)'`
+            echo $file
+            echo $mod
+        done
+    )
+}
+
+#
+# CHMOD EXTRACT
+#
+
+help_chmod_extract() echo "\
+Usage: `basename $0` chmod extract <source>
+    Creates pairs of lines for a file and its corresponding
+    four relevant permission octets from an overlay
+    directory, suitable for passing to one of:
+        overlay chmod extract <target>
+        overlay chmod svn extract <target>
+    In Subversion, the permissions are stored in a
+    unix:chmod property if they differ from norms:
+        755 for directories
+        644 for files
+        755 for files with svn:executable
+"
+
+shortcut chmod_extract chmod_x
+shortcut chmod_extract chmod_i
+
+do_chmod_extract() {
+    do_simulate_chmod_extract $* | run $*
+}
+
+do_simulate_chmod_extract() {
+    (
+        cd ${1-.};
+        while read file && read mod; do
+            echo chmod $mod $file
+        done
+    )
+}
+
+#
+# CHMOD SVN
+#
+
+help_chmod_svn_main() echo "\
+Usage: `basename $0` chmod svn create|extract <source|target>
+    Creates or extracts information about permissions
+    to or from the Subversion property unix:chmod
+    in a Subversion overlay directory.
+"
+menu chmod_svn
+
+#
+# CHMOD SVN COPY
+#
+
+help_chmod_svn_copy() echo "\
+Usage: `basename $0` chmod svn copy|cp [<source>] [<target>]
+    Applies the unix:chmod permissions in a source
+    Subversion overlay directory to the actual
+    Unix permissions in a target overlay directory.
+
+    By default, the source overlay is the current
+    working directory.
+
+    By default, the target is the same as the source.
+"
+
+shortcut chmod_svn_copy chmod_svn_cp
+
+do_chmod_svn_copy() {
+    do_simulate_svn_chmod_copy $* | run $*
+}
+
+do_simulate_svn_chmod_copy() {
+    source=${1-.}
+    target=${2-$source}
+    do_chmod_svn_create $source | do_simulate_chmod_extract $target
+}
+
+#
+# CHMOD SVN CREATE
+#
+
+help_chmod_svn_create() echo "\
+Usage: `basename $0` chmod svn create|c|o <source>
+"
+
+shortcut chmod_svn_create chmod_svn_c
+shortcut chmod_svn_create chmod_svn_o
+
+do_chmod_svn_create() {
+    do_property_create unix:chmod ${1-.}
+}
+
+#
+# CHMOD SVN EXTRACT
+#
+
+help_chmod_svn_extract() echo "\
+Usage: `basename $0` chmod svn extract|x|i <target>
+    Sets Subversion unix:chmod properties on a target
+    overlay based on the output of one of these commands:
+        overlay chmod create
+        overlay chmod svn create
+        overlay svn pg unix:chmod
+    The target Subversion overlay directory's unix:chmod
+    properties are only set if the permission deviates
+    from the norm for files, executable files, and
+    directories, that is 0644, 0755, and 0755 respectively.
+"
+
+shortcut chmod_svn_extract chmod_svn_x
+shortcut chmod_svn_extract chmod_svn_i
+
+do_chmod_svn_extract() {
+    do_simulate_chmod_svn_extract $* | run $*
+}
+
+do_simulate_chmod_svn_extract() {
+    (
+        cd ${1-.};
+        while read file && read mod; do
+            if [ -d "$file" ]; then
+                if [ "$mod" -ne 755 ]; then
+                    echo "echo $mod > /tmp/$mod"
+                    echo "svn ps unix:chmod -F /tmp/$mod $file"
+                    echo "rm /tmp/$mod"
+                else
+                    if [ "`svn pg unix:chmod $file 2>/dev/null`" ]; then
+                        echo "svn pd unix:chmod $file"
+                    fi
+                fi
+            fi
+            if [ -f "$file" ]; then
+                if [ "$mod" -ne 644 -a "$mod" -ne 755 ]; then
+                    echo "echo $mod > /tmp/$mod"
+                    echo "svn ps unix:chmod -F /tmp/$mod $file"
+                    echo "rm /tmp/$mod"
+                else
+                    if [ "`svn pg unix:chmod $file 2>/dev/null`" ]; then
+                        echo "svn pd unix:chmod $file"
+                    fi
+                fi
+                if [ "$mod" -eq 755 ]; then
+                    if [ ! "`svn pg svn:executable $file 2>/dev/null`" ]; then
+                        echo "echo '*' > /tmp/star"
+                        echo "svn ps svn:executable -F /tmp/star $file"
+                        echo "rm /tmp/star"
+                    fi
+                fi
+            fi
+        done
+    )
+}
+
+
+
+
+
+#
+# CHOWN
+#
+
+help_chown_main() echo "\
+Usage: `basename $0` chown [svn] create|extract <source|target>
+    Creates or extracts UNIX ownership (owner:group)
+    information to and from file systems or Subversion
+    repositories using the unix:chown property.
+"
+menu chown
+
+#
+# CHOWN COPY
+#
+
+help_chown_copy() echo "\
+Usage: `basename $0` chown copy|cp [<source>] [<target>]
+    Copies ownership (like root:wheel) information from
+    the actual files in a given source overlay and updates
+    the unix:chown Subversion properties in the given
+    target overlay.
+
+    By default, the source overlay is the current
+    working directory.
+
+    By default, the target is the same as the source.
+"
+
+shortcut chown_copy chown_cp
+
+do_chown_copy() {
+    do_simulate_chown_copy $* | run $*
+}
+
+do_simulate_chown_copy() {
+    source=${1-.}
+    target=${2-$source}
+    do_chown_create $source | do_simulate_chown_svn_extract $target
+}
+
+
+
+#
+# CHOWN CREATE
+#
+
+help_chown_create() echo "\
+Usage: `basename $0` chown create <source>
+    Creates line pairs of file names and their
+    corresponding Unix ownership string, suitable
+    for passing to one of:
+        overlay chown extract <target>
+        overlay chown svn extract <target>
+    If the <source> is a hyphen, -, then the list
+    of files to extract ownership information
+    from is read from standard input.
+"
+
+shortcut chown_create chown_c
+shortcut chown_create chown_o
+
+do_chown_create() {
+    (
+        (
+            if [ "$1" = "-" ]; then
+                cat
+            else
+                cd "${1-.}";
+                find . | grep -v '/\.svn' 
+            fi
+        ) |
+        while read file; do
+            if [ -e "$file" ]; then
+                echo $file
+                stat -f '%Su:%Sg' $file
+            fi
+        done
+    )
+}
+
+#
+# CHOWN EXTRACT
+#
+
+help_chown_extract() echo "\
+Usage: `basename $0` chown extract|x|i <source>
+    Reads pairs of lines, file names and their corresponding
+    unix ownerhship string like (root:wheel) formatted by commands
+    like:
+        overlay chown create <source>
+        overlay chown svn create <source>
+    and applies those ownership strings on a target
+    overlay directory with the chown command.
+"
+
+shortcut chown_extract chown_x
+shortcut chown_extract chown_i
+
+do_chown_extract() {
+    do_simulate_chown_extract $* | run $*
+}
+
+do_simulate_chown_extract() {
+    (
+        cd ${1-.};
+        while read file && read own; do
+            echo chown $own $file
+        done
+    )
+}
+
+#
+# CHOWN SVN
+#
+
+help_chown_svn_main() echo "\
+Usage: `basename $0` chown svn create|extract <source|target>
+    Creates and extracts archives of information about
+    UNIX ownership from the Subversion unix:chown
+    property to and from overlay directories.
+
+    All shortcuts apply:
+        create c o
+        extract x i
+        copy cp
+"
+menu chown_svn
+
+#
+# CHOWN SVN COPY
+#
+
+help_chown_svn_copy() echo "\
+Usage: `basename $0` chown svn copy|cp [<source>] [<target>]
+    Applies the unix:chown properties in a source
+    Subversion overlay directory to the actual
+    Unix permissions in a target overlay directory.
+
+    By default, the source overlay is the current
+    working directory.
+
+    By default, the target is the same as the source.
+"
+
+shortcut chown_svn_copy chown_svn_cp
+
+do_chown_svn_copy() {
+    do_simulate_svn_chown_copy $* | run $*
+}
+
+do_simulate_svn_chown_copy() {
+    source=${1-.}
+    target=${2-$source}
+    do_chown_svn_create $source | do_simulate_chown_extract $target
+}
+
+#
+# CHOWN SVN CREATE
+#
+
+help_chown_svn_create() echo "\
+Usage: `basename $0` chown svn create|c|o <source>
+    Writes pairs of lines corresponding to file names
+    and their Unix ownerhip string (like root:wheel)
+    from the unix:chown properties in a given
+    Subversion overlay directory.
+"
+
+shortcut chown_svn_create chown_svn_c
+shortcut chown_svn_create chown_svn_o
+
+do_chown_svn_create() {
+    do_property_create unix:chown ${1-.}
+}
+
+#
+# CHOWN SVN EXTRACT
+#
+
+help_chown_svn_extract() echo "\
+Usage: `basename $0` chown svn extract|x|i <target>
+    Reads pairs of lines, file names and their
+    Unix ownership strings (like root:wheel) and
+    sets the corresponding Subversion unix:chown
+    properties on the files in a target Subversion
+    overlay.  Superfluous properties are deleted
+    and unix:chown is only set if it's not root:wheel.
+"
+
+shortcut chown_svn_extract chown_svn_x
+shortcut chown_svn_extract chown_svn_i
+
+do_chown_svn_extract() {
+    do_simulate_chown_svn_extract $* | run $*
+}
+
+do_simulate_chown_svn_extract() {
+    (
+        cd ${1-.};
+        while read file && read own; do
+            if [ "$own" != "root:wheel" ]; then
+                echo "echo $own > /tmp/$own"
+                echo "svn ps unix:chown -F /tmp/$own $file"
+                echo "rm /tmp/$own"
+            else
+                if [ "`svn pg unix:chown $file`" ]; then
+                    echo "svn pd unix:chown $file"
+                fi
+            fi
+        done
+    )
+}
+
+#
+# DEFAULTS
+#
+
+help_defaults() echo "\
+Usage: `basename $0` def[ault]s [<source>]
+    Lists pairs of file names: a defaults file and
+    the file it should be copied to when restoring defaults
+    or performing an initial setup.  Retrieves the
+    default file information form Subversion's
+    overlay:default property
+
+    The default overlay directory is the current
+    working directory.
+"
+
+shortcut defaults defs
+
+do_defaults() {
+    (
+        cd ${1-.};
+        svn pg overlay:default -R . |
+        sed -n '/./ p' |
+        awk 'BEGIN {FS=" - "} {print $1; print $2}' |
+        while read file && read default; do
+            echo `dirname "$file"`/`basename "$file" .default`
+            echo "$file"
+        done
+    )
+}
+
+#
+# DEFAULT
+#
+
+help_default() echo "\
+Usage: `basename $0` def[ault] [<target>] [<source>]
+    Copies default files using the Subversion
+    overlay:default property.
+    
+    The files are copied from the defaults files in
+    the target overlay to their respective
+    files in the same overlay.  The source
+    overlay is only used for Subversion properties.
+
+    Simulating the default command creates a script
+    that can be applied on another machine using
+    its own defaults files.
+
+    The target directory is the current
+    working directory by default.
+
+    The source directory for the overlay:default
+    properties is the same as the target by default.
+
+    Without specifying a source or target overlay,
+    you can easily apply defaults to a working Subversion
+    checkout of an overlay.
+
+"
+
+shortcut default def
+
+do_default() {
+    do_simulate_default $* | run $*
+}
+
+do_simulate_default() {
+    target=${1-.}
+    source=${2-$target}
+    do_defaults $source |
+    while read file && read default; do
+        echo "[ ! -e "$file" ] && cp -p $default $file"
+    done
+}
+
+#
+# RESTORE
+#
+
+help_restore() echo "\
+Usage: `basename $0` restore [<target>] [<source>]
+    Restores defaults using the Subversion
+    overlay:default property.
+
+    All defaults are written over existing files in
+    the target overlay directory.
+
+    The target directory is the current
+    working directory by default.
+
+    The source directory is the same as the
+    target by default.
+"
+
+do_restore() {
+    do_simulate_restore $* | run $*
+}
+
+do_simulate_restore() {
+    target=${1-.}
+    source=${2-$target}
+    do_defaults $source |
+    while read file && read default; do
+        echo cp $default $file
+    done
+}
+
+#
+# PROPERTY
+#
+help_property_main() echo "\
+Usage: `basename $0` property|prop|p create|extract ...
+    Provides methods for creating and extracting
+    'archives' of particular Subversion properties.
+"
+
+menu property
+shortcut property prop
+shortcut property p
+
+#
+# PROPERTY CREATE
+#
+
+help_property_create() echo "\
+Usage: `basename $0` property|prop|p create|c|o <property> [<overlay>]
+    Creates an archive of the values for a given
+    Subversion property.
+"
+
+shortcut property_create property_c
+shortcut property_create property_o
+
+do_property_create() {
+    (
+        cd ${2-.};
+        svn propget -R ${1?No property specified.} . |
+        sed -n '/./ p' |
+        awk 'BEGIN {FS=" - "} {print $1; print $2}'
+    )
+}
+
+#
+# PROPERTY EXTRACT
+#
+help_property_extract() echo "\
+Usage: `basename $0` property|prop|p extract|x|o <property> [<overlay>]
+    Applies the values for a given Subversion property
+    to a Subversion overlay.
+"
+
+shortcut property_extract property_x
+shortcut property_extract property_i
+
+do_property_extract() {
+    property=${1?No property specified.}
+    overlay=${2-.}
+    do_simulate_property_extract $* | run $overlay
+}
+
+do_simulate_property_extract() {
+    property=${1?No property specified.}
+    while read file && read value; do
+        echo "echo "'"'"$value"'"'" > /tmp/svn-ps && svn ps $property -F /tmp/svn-ps $file"
+    done
+    echo "rm /tmp/svn-ps"
+}
+
+#
+# UPDATE
+#
+help_update() echo "\
+Usage: `basename $0` update|up ...
+    Performs a Subversion update including
+    changes to file system permissions and ownership.
+    If any files with defaults are missing, they are
+    created.
+"
+
+shortcut update up
+
+do_update() {
+    svn up
+    do_chmod_svn_cp
+    do_chown_svn_cp
+    do_default
+}
+
+#
+# COMMIT
+#
+help_commit() echo "\
+Usage: `basename $0` commit|ci ...
+    Performs a Subversion commit, including changes
+    to file system permissions and ownership.
+"
+
+shortcut commit ci
+
+do_commit() {
+    do_chmod_cp
+    do_chown_cp
+    svn ci $*;
+}
+
+#
+# GO!
+#
+
+main $*
+

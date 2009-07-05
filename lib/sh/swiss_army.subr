@@ -1,0 +1,93 @@
+#!/bin/sh -e
+
+#
+# MAIN
+#
+main() {
+    op=$1; shift 2>/dev/null || (help; exit 1)
+    eval "do_$op" $*
+}
+
+#
+# RUN
+#
+# utility for piping simulations to shell and
+# (perhaps) verbosely echoing the commands to stderr
+run() {
+    (
+        if [ "$1" != "-" ]; then
+            cd `dirname ${1-.}`;
+        fi
+        while read command; do
+            #echo $command 1>&2
+            echo $command | sh
+        done
+    )
+}
+
+#
+# SHORTCUT
+#
+# a utility for creating shortcuts for commands including
+# their help and simulation subroutines.
+#
+shortcut() {
+    name=$1; shift
+    while [ "$1" ]; do
+        eval "help_${1}() help_${name} \$*"
+        eval "do_${1}() do_${name} \$*"
+        eval "do_simulate_${1}() do_simulate_${name} \$*"
+        shift
+    done
+}
+
+#
+# MENU
+#
+# a utility for creating menu commands that defer to sub-commands
+# or display their help information.  Passes help and simulate commands
+# through as well.
+#
+
+menu() {
+    name=$1
+    eval "\
+help_${name}() {
+    op=\$1; shift 2>/dev/null || (help_${name}_main; exit 1);
+    eval help_${name}_\$op \$*
+}"
+    eval "\
+do_${name}() {
+    op=\$1; shift 2>/dev/null || (help_${name}_main; exit 1);
+    eval do_${name}_\$op \$*
+}"
+    eval "\
+do_simulate_${name}() {
+    op=\$1; shift 2>/dev/null || (help_${name}_main; exit 1);
+    eval do_simulate_${name}_\$op \$*
+}"
+}
+
+#
+# SIMULATE
+#
+
+help_simulate_main () echo -n "\
+Usage: `basename $0` sim[ulate] <command>
+    If a simulator is available, renders a script that,
+    when executed in the appropriate working directory,
+    is equivalent to running the command.
+"
+
+menu simulate
+shortcut simulate sim
+
+# 
+# HELP
+#
+
+do_help() {
+    op=$1; shift 2>/dev/null || (help; exit 1)
+    eval help_$op $*
+}
+
